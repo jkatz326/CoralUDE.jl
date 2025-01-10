@@ -2,7 +2,7 @@
 
 [![Build Status](https://github.com/jkatz326/CoralUDE.jl/actions/workflows/CI.yml/badge.svg?branch=master)](https://github.com/jkatz326/CoralUDE.jl/actions/workflows/CI.yml?query=branch%3Amaster)
 
-For use in upcoming paper by Dr. Emerson Arehart. 
+For use in upcoming paper by Dr. Emerson Arehart. Requires Julia 1.11.
 
 To install and load CoralUDE, open Julia and type the following code:
 ```
