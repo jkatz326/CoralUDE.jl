@@ -11,7 +11,7 @@ To install and load CoralUDE, open Julia and type the following code:
 
 No official documentation at this stage. To learn more, navigate to src -> mumby_model.jl and read comments.
 
-#Tutorial 
+# Tutorial
 
 As a simple tutorial, run the following code:
 ```
