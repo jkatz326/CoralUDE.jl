@@ -1,7 +1,5 @@
 using UniversalDiffEq, Lux, DataFrames, OrdinaryDiffEq, Distributions, Random, Plots
 
-export coral_data, ude_model_from_data, ude_model, node_model, phase_plane, state_estimates
-
 #HELPER FUNCTIONS 
 
 #=Grazing Rate Functions: In our model, the grazing parameter g is replaced by a function λ(t) that takes in

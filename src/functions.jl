@@ -10,5 +10,3 @@ function testUDE()
     plot_predictions(model)
     plot_state_estimates(model)
 end 
-
-export greet_CoralUDE
