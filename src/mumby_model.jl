@@ -39,8 +39,8 @@ end
 #Given a set of parameters p and a time t, computes the grazing rate at time t and adds process noise to each parameter
 function unpack_values(p, t)
 	dist = p.dist
-	noise = rand(dist, 5)
-	return p.a + noise[1], p.γ + noise[2], p.r + noise[3], p.d + noise[4], p.λ(t) + noise[5]
+	noise = rand(dist, 1)
+	return p.a, p.γ, p.r, p.d, p.λ(t) + noise[1]
 end;
 
 #Ensures that initial conditions are not too close to 0 or 1
