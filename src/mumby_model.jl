@@ -207,7 +207,7 @@ in a phase plane.
 function phase_plane(model; start = .05, stop = 1.00, step = .1, max_T = 250)
     u0_array = [] 
     for u01 in range(start, stop = stop, step = step)
-        for u02 in range(start, stop = stop, step = .1)
+        for u02 in range(start, stop = stop, step = step)
             if (u01 + u02 > 1) #can't have total percent area be greater than one
                 continue 
             end
