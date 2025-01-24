@@ -83,17 +83,17 @@ end
 
 #Synthetic Data Generation:
 #=
-Using the ODEs described above, generates a model of the equations where the death rate term is replaced by a neural network. 
-This neural network is trained on a subset of the synthetic data that is designated for training. 
-Then, the function outputs the trained model along with the remaining data for testing.
+Generates a data set of simulated coral reef dynamics using the ODEs above. Used to train the Universal Differential Equation model specified below. 
 Parameters-- 
 - plot : true generates a plot of the data
 - seed : random seed for data Generation
+- datasize : number of data points at which we save the output of the ODE solver 
 - σ1 : parameter that controls process noise
 - σ2 : parameter that controls observation noise
+- T : data will be generated from time 0 to time T
 - The remaining paramters are from the Mumby model. See above. 
 =#
-function coral_data(;plot = false, seed = 123, datasize = 60, T = 300, σ1 = 0, σ2 = 0, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3))
+function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false)
     # set seed 
     Random.seed!(seed)
 
@@ -112,13 +112,27 @@ function coral_data(;plot = false, seed = 123, datasize = 60, T = 300, σ1 = 0, 
     # add observation noise 
     ode_data .+= ode_data .* rand(Normal(0.0, σ2), size(ode_data))
 
+    #format data, return now if only data requested 
+    data = DataFrame(x1 = ode_data[1,:], x2 = ode_data[2,:], time = tsteps)
+    if !(plot || return_inputs)
+        return data 
+    end 
+
+    # collect inputs if requested
+    inputs = nothing
+    if return_inputs
+        inputs = (seed = seed, datasize = datasize, T = T, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+    end 
+
+    # generate plot if requested, return 
     if plot
         plt = Plots.scatter(tsteps,transpose(ode_data), xlabel = "Time", ylabel = ["Macroalgae % Cover", "Coral % Cover"], label = "")
-        data = data = DataFrame(x1 = ode_data[1,:], x2 = ode_data[2,:], time = tsteps)
-        return data, plt
+        if return_inputs
+            return data, plt, inputs 
+        end
+        return data, plt 
     end
-    data = DataFrame(x1 = ode_data[1,:], x2 = ode_data[2,:], time = tsteps)
-    return data
+    return data, inputs 
 end
 
 #Universal Differential Equation Model:
@@ -127,15 +141,15 @@ Using the ODEs described above, generates a model of the equations where the dea
 This neural network is trained on a subset of the synthetic data that is designated for training. 
 Then, the function outputs the trained model along with the remaining data for testing.
 Parameters-- 
-- speedy = false allows for complete training of model. When speedy = true, training cut off after 50 iterations.
+- maxiter : max number of iterations for gradient descent. Default is negative which does not set a max number of iterations. 
 - Training data will be generated from times 0 to T1
-- Testing data will be generated from times T1 + 1 to T2
+- Testing data will be generated from times T1 + 1 to last time in coral data 
 - Description of other model parameters can be found in code block above. 
 =#
 
-function ude_model_from_data(data;speedy = false, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44)
-
-	#Seperate both data frames into testing data and training data 
+function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1, d = .44, return_inputs = false, saved_parameters = nothing)
+	
+    #Seperate both data frames into testing data and training data 
     train_data = subset(data, :time => time -> time .<= T1)
     test_data = subset(data, :time => time -> time .> T1)
 
@@ -163,48 +177,79 @@ function ude_model_from_data(data;speedy = false, T1 = 175, T2 = 300, u01 = .2, 
 	#Generate model using UniversalDiffEq
     model = CustomDerivatives(train_data, derivs!,parameters; proc_weight = 2.5, obs_weight = 1, reg_weight = 10^-5, reg_type = "L2")
 
-	#Train the model. If speedy, cut off training early. 
-    if (speedy)
-        gradient_descent!(model, maxiter = 50)
-    else 
+	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
+    if !isnothing(saved_parameters)
+        model.parameters = saved_parameters
+    elseif (maxiter < 0)
         gradient_descent!(model)
+    else 
+        gradient_descent!(model, maxiter = maxiter)
     end
-    return model, test_data
+
+    #If returning inputs, collect inputs and output with model and test data. Otherwise, output output model and test data.
+    if (return_inputs)
+        inputs = (maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d)
+        return model, test_data, inputs 
+    else 
+        return model, test_data
+    end 
 end
 
 #Wrapper around ude_model_from_data that generates the data before training the model.
-function ude_model(;speedy = false, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3))
-	#Generete Synthetic data using Mumby Equations
-    data = coral_data(T = T2, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+function ude_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
 	
-    return ude_model_from_data(data, speedy = speedy, T1 = T1, T2 = T2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d)
+    #Generate Synthetic data using Mumby Equations
+    data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+
+    #Generate the model 
+    model, test_data = ude_model_from_data(data, maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d, return_inputs = false, saved_parameters = saved_parameters)
+
+    #If returning inputs, collect inputs and output with model and test data. Otherwise, output model and test data. 
+    if (return_inputs)
+        inputs = (maxiter = maxiter, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, T1 = T1, T2 = T2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+        return model, test_data, inputs
+    else 
+        return model, test_data
+    end 
 end
 
 #Same as the UDE function above but trains a generic neural net [NODE] rather than a UDE
-function node_model(;speedy = false, T1 = 175, T2 = 300, σ1 = 0, σ2 = 0, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3))
+function node_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
+    
     #Generete Synthetic data using Mumby Equations
-    data = coral_data(T = T2, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+    data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
 
 	#Seperate both data frames into testing data and training data
     train_data = subset(data, :time => time -> time .<= T1)
     test_data = subset(data, :time => time -> time .> T1)
 
 	#Generate NODE model 
-    model = NODE(train_data);
+    model = NODE(train_data)
 
-	#Train the model. If speedy, cut off training early. 
-    if (speedy)
-        gradient_descent!(model, maxiter = 50)
-    else 
+	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
+    if !isnothing(saved_parameters)
+        model.parameters = saved_parameters
+    elseif (maxiter < 0)
         gradient_descent!(model)
+    else 
+        gradient_descent!(model, maxiter = maxiter)
     end
-    return model, test_data
+    
+    #If returning inputs, collect inputs and output with model and test data. Otherwise, output output model and test data. 
+    if (return_inputs)
+        inputs = (maxiter = maxiter, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, T1 = T1, T2 = T2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+        return model, test_data, inputs
+    else 
+        return model, test_data
+    end 
 end
 
 #=Generates an array of initial conditions and then plots the model's predictions for each set of initial conditions
 in a phase plane. 
 =#
-function phase_plane(model; start = .05, stop = 1.00, step = .1, max_T = 250)
+function phase_plane(model; start = .05, stop = 1.00, step = .1, max_T = 250, title = "Plot Title", xlabel = "Macroalgae Cover", ylabel = "Coral Cover")
+    
+    #Generate array of initial conditions to plot forecast for 
     u0_array = [] 
     for u01 in range(start, stop = stop, step = step)
         for u02 in range(start, stop = stop, step = step)
@@ -214,7 +259,13 @@ function phase_plane(model; start = .05, stop = 1.00, step = .1, max_T = 250)
             push!(u0_array, [u01, u02]) 
         end 
     end 
-    return UniversalDiffEq.phase_plane(model, u0_array, T = 250)
+
+    #Generate plot and add input labels 
+    plt = UniversalDiffEq.phase_plane(model, u0_array, T = max_T)
+    title!(plt, title)
+    xlabel!(plt, xlabel)
+    ylabel!(plt, ylabel)
+    return plt 
 end 
 
 function state_estimates(model)

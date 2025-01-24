@@ -2,63 +2,75 @@ using CoralUDE
 using Test
 
 @testset "CoralUDE.jl" begin
-    @test CoralUDE.greet_CoralUDE() == "Hello CoralUDE!"
-    @test CoralUDE.greet_CoralUDE() != "Hello world!"
-    @test try
-        CoralUDE.testUDE()
-        true
-    catch
-        false
-    end
-    @test try
-        CoralUDE.coral_data()
-        println("coral_data passed")
-        true
-    catch
-        println("coral_data failed")
-        false
-    end
-    @test try
-        CoralUDE.ude_model()
-        println("ude_model passed")
-        true
-    catch
-        println("ude_model failed")
-        false
-    end
-    @test try
-        data = CoralUDE.coral_data()
-        CoralUDE.ude_model_from_data(data)
-        println("ude_model_from_data passed")
-        true
-    catch
-        println("ude_model_from_data failed")
-        false
-    end
-    @test try
-        CoralUDE.node_model()
-        println("node_model passed")
-        true
-    catch
-        println("node_model failed")
-        false
-    end
-    @test try
-        model, test_data = CoralUDE.ude_model()
-        CoralUDE.state_estimates(model)
-        println("state_estimates passed")
-        true
-    catch
-        println("state_estimates failed")
-        false
-    end
-    @test try
-        model, test_data = CoralUDE.ude_model()
-        CoralUDE.phase_plane(model)
-        println("phase_plane passed")
-        true
-    catch
-        println("phase_plane failed")
-        false
-    end
+    @testset "greet_CoralUDE" begin 
+        @test CoralUDE.greet_CoralUDE() == "Hello CoralUDE!"
+        @test CoralUDE.greet_CoralUDE() != "Hello world!"
+    end 
+
+    @testset "testUDE" begin 
+        @test try
+            CoralUDE.testUDE()
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "coral_data" begin
+        @test try
+            CoralUDE.coral_data()
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "ude_model" begin
+        @test try
+            CoralUDE.ude_model(maxiter = 100)
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "ude_model_from_data" begin 
+        @test try
+            data = CoralUDE.coral_data()
+            CoralUDE.ude_model_from_data(data, maxiter = 100)
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "node_model" begin
+        @test try
+            CoralUDE.node_model(maxiter = 100)
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "state_estimates" begin 
+        @test try
+            model, test_data = CoralUDE.ude_model(maxiter = 50)
+            CoralUDE.state_estimates(model)
+            true
+        catch
+            false
+        end
+    end 
+
+    @testset "state_estimates" begin 
+        @test try
+            model, test_data = CoralUDE.ude_model(maxiter = 50)
+            CoralUDE.phase_plane(model)
+            true
+        catch
+            false
+        end
+    end 
+    
 end
