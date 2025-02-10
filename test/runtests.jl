@@ -63,7 +63,7 @@ using Test
         end
     end 
 
-    @testset "state_estimates" begin 
+    @testset "phase_plane" begin 
         @test try
             model, test_data = CoralUDE.ude_model(maxiter = 50)
             CoralUDE.phase_plane(model)
