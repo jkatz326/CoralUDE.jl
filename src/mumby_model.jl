@@ -1,4 +1,4 @@
-using UniversalDiffEq, Lux, DataFrames, OrdinaryDiffEq, Distributions, Random, Plots
+using UniversalDiffEq, Lux, DataFrames, StochasticDiffEq, OrdinaryDiffEq, DiffEqFlux, Distributions, Random, Plots
 
 #HELPER FUNCTIONS 
 
@@ -61,8 +61,14 @@ function valid_range(v; lower=1e-2, upper=1-1e-2, α=50.0)
     return smooth_max(lower, smooth_min(v, upper; α=α); α=α)
 end
 
+function valid_range2(v)
+    return clamp(v, 1e-2, 1 - 1e-2)
+end
 
-function convert_to_UDE(custom_ude)::UDE
+scaled_tanh(x) = 0.5 * (tanh(x) + 1)
+
+
+function convert_to_UDE(custom_ude; ode_solver = Tsit5(), ad_method = ForwardDiffSensitivity())::UDE
     # Create a new UDE instance by copying all the fields from CustomUDE
     return UDE(
         custom_ude.times,
@@ -103,12 +109,42 @@ Interpretation of ODEs below (Mumby 2007):
 - All other dependencies in the ODEs below are more intuitive. 
 =#
 function mumby_eqns(du, u, p, t)
-    u1 = valid_range(u[1])
-    u2 = valid_range(u[2])
-	a, γ, r, d, g = unpack_values(p, t)
-    du[1] = a*u1*u2 - (g*u1)/(1 - u2 + 1e-6) + γ*u1*(1 - u1 - u2)
+    u1, u2 = u
+	a, γ, r, d, λ, _ = p
+    g = λ(t)
+    du[1] = a*u1*u2 - (g*u1)/(1 - u2 + .01) + γ*u1*(1 - u1 - u2)
     du[2] = r*(1 - u1 - u2)*u2 - d*u2 - a*u1*u2
-end;
+end
+
+#Process Noise:
+#dw function for system of SDEs, additive process noise for grazing term 
+function mumby_noise(du, u, p, t)
+    u1, u2 = u
+    _, _, _, _, _, σ1 = p
+    du[1] = -σ1*u1/(1 - u2)
+    du[2] = 0
+end
+
+#Observation Noise, add comments
+function softmax(u)
+    xe = 1-sum(u)
+    sm = exp(xe)+sum(exp.(u))
+    return exp.(u) ./ sm
+end 
+
+function inv_softmax(p)
+    p = p.+10^-6
+    pe = 1-sum(p)
+    c = (1-sum(log.(p))-log(pe))/(length(p)+1)
+    return log.(p) .+ c 
+end 
+
+function add_obs_noise(u, σ2)
+    u_tr = inv_softmax(u)
+    u_tr = u_tr .+ rand(Normal(0.0, σ2), length(u_tr))
+    return softmax(u_tr)
+end
+
 
 #Helper function for determining how effective forecasts are
 function when_below(data, val)
@@ -144,19 +180,15 @@ function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, 
 
     # model parameters
     u0 = Float32[u01, u02]
-    p = (a = a, γ = γ, r = r, d = d, λ = λ, dist = LogNormal(0.0, σ1))
+    p = (a = a, γ = γ, r = r, d = d, λ = λ, σ1 = σ1)
 
     # generate time series with DifferentialEquations.jl
-    prob_trueode = ODEProblem(mumby_eqns, u0, tspan, p)
-    ode_data = Array(solve(prob_trueode, Tsit5(), saveat = tsteps))
+    prob_trueode = SDEProblem(mumby_eqns, mumby_noise, u0, tspan, p)
+    ode_data = Array(solve(prob_trueode, SOSRI(), saveat = tsteps))
 
-    ode_data .+= ode_data .* rand(LogNormal(0.0, σ2), size(ode_data))
-
-    # Clamp values to valid range for all data (rows) in ode_data
-    for i in 1:size(ode_data, 2)  # Iterate over each column (variables)
-        ode_data[1, i] = valid_range(ode_data[1, i])  # Clamping coral
-        ode_data[2, i] = valid_range(ode_data[2, i])  # Clamping macroalgae
-    end
+    #Add Observation Noise
+    ode_data = min.(1 - 1e-6, max.(ode_data, 1e-6))
+    ode_data = hcat([add_obs_noise(ode_data[:, i], σ2) for i in 1:size(ode_data, 2)]...)
 
     #format data, return now if only data requested
     data = DataFrame(x1 = ode_data[1,:], x2 = ode_data[2,:], time = tsteps)
@@ -211,27 +243,11 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     parameters = (NN = NNparameters, a = a, γ = γ, r = r, d = d)
 	
     # Define derivatives (time dependent NODE)
-    function derivs!(du,u,p,t)
-        u1, u2 = u
-        vals = NN([u[1],u[2],t],p.NN,NNstates)[1]
-		a, γ, r, d = p.a, p.γ, p.r, p.d
-        du[1] = a*u1*u2 - vals[1] + γ*u1*(1 - u1 - u2)
-        du[2] = r*(1 - u1 - u2)*u2 - d*u2 - a*u1*u2
-        return du
-    end
-
     function derivs2!(du, u, p, t)
-        # Apply stability fixes to state variables
-        u1, u2 = tanh.(u)
-    
-        # Evaluate neural network with bounded outputs
-        vals = tanh.(NN([u1, u2, t], p.NN, NNstates)[1]) # Keeps vals within (-1,1)
-    
-        # Parameters
+        u1, u2 = scaled_tanh.(u)
+        vals = scaled_tanh.(NN([u1, u2, t], p.NN, NNstates)[1])
         a, γ, r, d = p.a, p.γ, p.r, p.d
-    
-        # Differential equations
-        du[1] = a * u1 * u2 - vals[1] + γ * u1 * (1 - u1 - u2)
+        du[1] = a * u1 * u2 + vals[1] + γ * u1 * (1 - u1 - u2)
         du[2] = r * (1 - u1 - u2) * u2 - d * u2 - a * u1 * u2
     end
 
@@ -245,7 +261,7 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     end
     link = (u, p) -> 1 ./(1 .+ exp.(-u))
     link2 = (u, p) -> clamp.(u, 1e-3, 1 - 1e-3)
-    link3 = (u, p) -> sigmoid.(10 .* (u .- 0.5))
+    link5 = (u, p) -> sigmoid.(10 .* (u .- 0.5))
     process_loss = (u, uhat, dt, p) -> sum((u .- uhat).^2 ./ dt) + sum(abs.(clamp.(u, -Inf, 0)) + abs.(clamp.(u, 1, Inf)))
     softclip(x) = 1e-4 + (1 - 2e-4) * (1 / (1 + exp(-20*(x - 0.5))))
     link4(u, p) = softclip.(u)
@@ -254,7 +270,7 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
         lower = 1e-2
         upper = 1 - 1e-2
         # Define a large penalty constant; adjust this constant as needed
-        K = 1e6
+        K = 1e3
     
         # Compute the base loss (for instance, mean squared error weighted by 1/dt)
         base_loss = sum(((u .- uhat) .^ 2) ./ dt)
@@ -265,11 +281,17 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
         
         return base_loss + penalty
     end
+    statevariabletransform3 = (u, p) -> clamp.(u, 0, 1)
+    link3 = (u, p) -> clamp.(u, 0, 1)
+    processloss3 = (u, uhat, dt, p) -> sum((clamp.(uhat, 0, 1) .- uhat).^2 ./ dt)
+    observationloss3 = (u, uhat, p) -> sum((clamp.(uhat, 0, 1) .- uhat).^2)
+
 	#Generate model using UniversalDiffEq
-    model = UniversalDiffEq.CustomModel(train_data, derivs2!,parameters; reg_weight = 10^-5, reg_type = "L2", state_variable_transform = state_variable_transform, process_loss = process_loss2, link = link)
+    model = CustomDerivatives(train_data, derivs2!,parameters; proc_weight = .1, obs_weight = 1, reg_weight = 10^-8, reg_type = "L2")
+    #model = UniversalDiffEq.CustomModel(train_data, derivs!,parameters)
     #process_loss = process_loss2, reg_type = "L2", state_variable_transform = state_variable_transform, link = link
 
-    #proc_weight = 2.5, obs_weight = 1,
+    #proc_weight = 2.5, obs_weight = 1, 
 	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
     if !isnothing(saved_parameters)
         model.parameters = saved_parameters
@@ -279,7 +301,7 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
         gradient_descent!(model, maxiter = maxiter)
     end
 
-    model = convert_to_UDE(model);
+    #model = convert_to_UDE(model)
 
     #If returning inputs, collect inputs and output with model and test data. Otherwise, output output model and test data.
     if (return_inputs)

@@ -41,6 +41,7 @@ function save_model(file_name, model, inputs;is_path = false)
     end 
 end 
 
+#Load in a model that was previously saved using 'save_model'
 function load_model(file_name;is_path = false)
     if (is_path)
         saved = JLD2.load_object(file_name) #Load rhs from path 
