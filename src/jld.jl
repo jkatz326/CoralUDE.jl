@@ -4,8 +4,13 @@ using JLD2, UniversalDiffEq
 https://jack-h-buckner.github.io/UniversalDiffEq.jl/dev/modelanalysis/
 =#
 
+# get ODE functions 
+function get_right_hand_side_(ude)
+    (u,i,t) -> ude.process_model.rhs(u,i,ude.parameters.process_model,t)
+end 
+
 function save_rhs(file_name, model;is_path = false)
-    rhs = UniversalDiffEq.get_right_hand_side(model) #Get RHS 
+    rhs = get_right_hand_side_(model) #Get RHS 
     if (is_path) #Interpret file_name as path,
         JLD2.save_object(file_name, rhs) #Save to this path
     else #Else, interpret file_name as name

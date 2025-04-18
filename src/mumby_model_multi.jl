@@ -136,9 +136,8 @@ function mumby_noise(du, u, p, t)
     u1, u2 = u
     _, _, _, _, _, σ1 = p
     ϵ = .01
-    du[1] = clamp(σ1*u1/(1 - u2 + ϵ), 0, 1)
+    du[1] = σ1*u1/(1 - u2 + ϵ)
     du[2] = 0
-    println(du[1])
 end
 
 #Observation Noise, add comments
@@ -187,7 +186,6 @@ function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, 
     p = (a = a, γ = γ, r = r, d = d, λ = λ, σ1 = σ1)
 
     # generate time series with DifferentialEquations.jl
-    println("A New Start")
     prob_trueode = SDEProblem(mumby_eqns, mumby_noise, u0, tspan, p)
     solution = solve(prob_trueode, SOSRI(), saveat = tsteps, save_noise=true)
     ode_data = Array(solution)
@@ -224,6 +222,15 @@ function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, 
     return data, inputs 
 end
 
+function merge_coral_data(df1, df2)
+    newdf1 = copy(df1)
+    newdf2 = copy(df2)
+    newdf1[!, :series] .= 1
+    newdf2[!, :series] .= 2
+    combined = vcat(newdf1, newdf2)
+    return combined
+end 
+
 #Universal Differential Equation Model:
 #=
 Using the ODEs described above, generates a model of the equations where the death rate term is replaced by a neural network. 
@@ -243,8 +250,9 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     test_data = subset(data, :time => time -> time .> T1)
 
     # set neural network dimensions
+    num_series = 2
     dims_out = 1
-    dims_in = 3
+    dims_in = 3 + num_series
     hidden = 5
 
     # Define neural network with Lux.jl
@@ -254,16 +262,19 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     parameters = (NN = NNparameters, a = a, γ = γ, r = r, d = d)
 	
     # Define derivatives (time dependent NODE)
-    function derivs!(du, u, p, t)
+    function derivs!(du, u, i, p, t)
+        index = round(Int, i)
+        one_hot = zeros(num_series, 1)
+        one_hot[index] = 1
         u1, u2 = scaled_tanh.(u)
-        vals = scaled_tanh.(NN([u1, u2, t], p.NN, NNstates)[1])
+        vals = scaled_tanh.(NN(vcat([u1, u2, t], one_hot), p.NN, NNstates)[1])
         a, γ, r, d = p.a, p.γ, p.r, p.d
         du[1] = a * u1 * u2 + vals[1] + γ * u1 * (1 - u1 - u2)
         du[2] = r * (1 - u1 - u2) * u2 - d * u2 - a * u1 * u2
     end
 
 	#Generate model using UniversalDiffEq
-    model = CustomModel(train_data, derivs!,parameters, state_variable_transform = x -> scaled_tanh.(x))
+    model = MultiCustomDerivatives(train_data,derivs!,parameters;proc_weight=2.0,obs_weight=0.5,reg_weight=10^-4)
     
     #state_variable_transform = x -> 1 ./ (1 .+ exp.(-x)
 	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
@@ -274,8 +285,6 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     else 
         gradient_descent!(model, maxiter = maxiter)
     end
-
-    model = convert_to_UDE(model)
 
     #If returning inputs, collect inputs and output with model and test data. Otherwise, output output model and test data.
     if (return_inputs)
@@ -305,17 +314,14 @@ function ude_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T
 end
 
 #Same as the UDE function above but trains a generic neural net [NODE] rather than a UDE
-function node_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
-    
-    #Generete Synthetic data using Mumby Equations
-    data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+function node_model(data;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
 
 	#Seperate both data frames into testing data and training data
     train_data = subset(data, :time => time -> time .<= T1)
     test_data = subset(data, :time => time -> time .> T1)
 
 	#Generate NODE model 
-    model = NODE(train_data)
+    model = MultiNODE(train_data)
 
 	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
     if !isnothing(saved_parameters)
