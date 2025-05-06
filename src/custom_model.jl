@@ -1,11 +1,14 @@
 using UniversalDiffEq
 include("mumby_model.jl")
-data, plt = coral_data(plot = true, σ1 = .1, σ2 = 0, u01 = .6, u02 = .1, λ = constant_fun(.3), datasize = 60, seed = 765, T = 50)
-#model, test_data = ude_model_from_data(data)
-#plt2 = phase_plane(model, step = .05)
+include("jld.jl")
+covar_fun =  g -> g < .2 ? 0 : 1
+λ = one_change_fun(.1, .3, 25)
+model, test_data, inputs = ude_model(maxiter = 20, covar_fun = covar_fun, return_covar = true, return_inputs = true)
+save_model("test_file", model, inputs)
+model1, test_data1 = load_model("test_file")
+state_estimates(model1)
 #print(UniversalDiffEq.equilibrium_and_stability(model, .1, .9))
 #plot(plt, plt2, layout = (1, 2), legend = false)
-print(data)
 #=
 DataFrames = ">=1.7.0"
 DiffEqFlux = "4.1.0"
