@@ -1,8 +1,5 @@
 using UniversalDiffEq, Lux, DataFrames, StochasticDiffEq, OrdinaryDiffEq, Distributions, Random, Plots, DiffEqFlux
 
-const DEFAULT_HYPERPARAMETERS = (time_column_name =  "time", proc_weight = 1.0, obs_weight = 1.0, reg_weight = 1e-6, 
-reg_type = "L2", l = 0.25, extrap_rho = 0.0, ode_solver = Tsit5(), ad_method = ForwardDiffSensitivity())
-
 #HELPER FUNCTIONS 
 
 #=Grazing Rate Functions: In our model, the grazing parameter g is replaced by a function λ(t) that takes in
@@ -127,7 +124,7 @@ Interpretation of ODEs below (Mumby 2007):
 function mumby_eqns(du, u, p, t)
     u1, u2 = u
 	a, γ, r, d, λ, _ = p
-    ϵ = .001
+    ϵ = .01
     g = λ(t)
     du[1] = a*u1*u2 - (g*u1)/(1 - u2 + ϵ) + γ*u1*(1 - u1 - u2)
     du[2] = r*(1 - u1 - u2)*u2 - d*u2 - a*u1*u2 + .01
@@ -138,8 +135,8 @@ end
 function mumby_noise(du, u, p, t)
     u1, u2 = u
     _, _, _, _, _, σ1 = p
-    ϵ = .001
-    du[1] = clamp(σ1*u1/(1 - u2 + ϵ), 0, 1)
+    ϵ = .01
+    du[1] = σ1*u1/(1 - u2 + ϵ)
     du[2] = 0
 end
 
@@ -174,12 +171,9 @@ Parameters--
 - σ1 : parameter that controls process noise
 - σ2 : parameter that controls observation noise
 - T : data will be generated from time 0 to time T
-- return_inputs : returns inputs to the function iff true, used for saving model with JLD
-- return_covar : returns covariate vector iff true, covariate derived from grazing using covar_fun
-- covar_fun : function applied to grazing to obtain covariate (e.x transform grazing into binary of high and low)
 - The remaining paramters are from the Mumby model. See above. 
 =#
-function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, return_covar = false, covar_fun = (g -> g))
+function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false)
     # set seed 
     Random.seed!(seed)
 
@@ -196,56 +190,46 @@ function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, 
     solution = solve(prob_trueode, SOSRI(), saveat = tsteps, save_noise=true)
     ode_data = Array(solution)
 
+    noise_data = solution.W.(solution.t)
+    noise_applied = [noise[1][1] for noise in noise_data]
+    effective_g = λ.(solution.t) .+ (noise_applied .* σ1)
+
+
     #Add Observation Noise
     ode_data = min.(1 - 1e-6, max.(ode_data, 1e-6))
     ode_data = hcat([add_obs_noise(ode_data[:, i], σ2) for i in 1:size(ode_data, 2)]...)
 
     #format data, return now if only data requested
     data = DataFrame(x1 = ode_data[1,:], x2 = ode_data[2,:], time = tsteps)
-
-    # generate covariate if requested
-    X = nothing
-    if return_covar
-        cov = covar_fun.(λ.(tsteps))
-        X = DataFrame(
-            time = tsteps,
-            covariate = cov
-        )
-    end
+    if !(plot || return_inputs)
+        return data 
+    end 
 
     # collect inputs if requested
     inputs = nothing
     if return_inputs
-        inputs = (seed = seed, datasize = datasize, T = T, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ, return_covar = return_covar, covar_fun = covar_fun)
+        inputs = (seed = seed, datasize = datasize, T = T, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
     end 
 
-    plt = nothing
     # generate plot if requested, return 
     if plot
         plt = Plots.scatter(tsteps,transpose(ode_data), xlabel = "Time", ylabel = ["Macroalgae % Cover", "Coral % Cover"], label = "")
+        if return_inputs
+            return data, plt, inputs 
+        end
+        return data, plt 
     end
-
-    # Case on what to return 
-    case = (return_covar, return_inputs, plot)
-    if case == (true,  true,  true)
-        return data, X, inputs, plt
-    elseif case == (true,  true,  false)
-        return data, X, inputs
-    elseif case == (true,  false, true)
-        return data, X, plt
-    elseif case == (true,  false, false)
-        return data, X
-    elseif case == (false, true,  true)
-        return data, inputs, plt
-    elseif case == (false, true,  false)
-        return data, inputs
-    elseif case == (false, false, true)
-        return data, plt
-    else
-        return data
-    end
-    
+    return data, inputs 
 end
+
+function merge_coral_data(df1, df2)
+    newdf1 = copy(df1)
+    newdf2 = copy(df2)
+    newdf1[!, :series] .= 1
+    newdf2[!, :series] .= 2
+    combined = vcat(newdf1, newdf2)
+    return combined
+end 
 
 #Universal Differential Equation Model:
 #=
@@ -259,28 +243,16 @@ Parameters--
 - Description of other model parameters can be found in code block above. 
 =#
 
-function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1, d = .44, return_inputs = false, hyperparameters = DEFAULT_HYPERPARAMETERS, X = nothing, saved_parameters = nothing)
+function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1, d = .44, return_inputs = false, saved_parameters = nothing)
 	
     #Seperate both data frames into testing data and training data 
     train_data = subset(data, :time => time -> time .<= T1)
-    test_data = nothing
-    train_X = nothing
-
-    if (isnothing(X))
-        test_data = subset(data, :time => time -> time .> T1)
-        dims_in = 3
-    else 
-        dims_in = 4
-        test_data = leftjoin(
-            subset(data,        :time => t -> t .> T1),
-            subset(X,           :time => t -> t .> T1),
-            on = :time
-        )
-        train_X = subset(X, :time => time -> time .<= T1)
-    end
+    test_data = subset(data, :time => time -> time .> T1)
 
     # set neural network dimensions
+    num_series = 2
     dims_out = 1
+    dims_in = 3 + num_series
     hidden = 5
 
     # Define neural network with Lux.jl
@@ -288,32 +260,23 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     rng = Random.default_rng()
     NNparameters, NNstates = Lux.setup(rng,NN)
     parameters = (NN = NNparameters, a = a, γ = γ, r = r, d = d)
-
-    # Define derivatives (time dependent NODE)
-    function derivs_none!(du, u, p, t)
-        u1, u2 = scaled_tanh.(u)
-        vals = scaled_tanh.(NN([u1, u2, t], p.NN, NNstates)[1])
-        a, γ, r, d = p.a, p.γ, p.r, p.d
-        du[1] = a * u1 * u2 + vals[1] + γ * u1 * (1 - u1 - u2)
-        du[2] = r * (1 - u1 - u2) * u2 - d * u2 - a * u1 * u2
-    end
-
-    function derivs_covar!(du, u, X, p, t)
-        u1, u2 = scaled_tanh.(u)
-        vals = scaled_tanh.(NN([u1, u2, t, X[1]], p.NN, NNstates)[1])
-        a, γ, r, d = p.a, p.γ, p.r, p.d
-        du[1] = a * u1 * u2 + vals[1] + γ * u1 * (1 - u1 - u2)
-        du[2] = r * (1 - u1 - u2) * u2 - d * u2 - a * u1 * u2
-    end
 	
-    model = nothing
-    if (isnothing(X))
-        #Generate model using UniversalDiffEq
-        model = CustomDerivatives(train_data, derivs_none!, parameters, time_column_name = hyperparameters.time_column_name, proc_weight = hyperparameters.proc_weight, obs_weight = hyperparameters.obs_weight, reg_weight = hyperparameters.reg_weight, reg_type = hyperparameters.reg_type, l = hyperparameters.l, extrap_rho = hyperparameters.extrap_rho, ode_solver = hyperparameters.ode_solver, ad_method = hyperparameters.ad_method)
-    else
-        model = CustomDerivatives(train_data, X, derivs_covar!, parameters, time_column_name = hyperparameters.time_column_name, proc_weight = hyperparameters.proc_weight, obs_weight = hyperparameters.obs_weight, reg_weight = hyperparameters.reg_weight, reg_type = hyperparameters.reg_type, l = hyperparameters.l, extrap_rho = hyperparameters.extrap_rho, ode_solver = hyperparameters.ode_solver, ad_method = hyperparameters.ad_method)
+    # Define derivatives (time dependent NODE)
+    function derivs!(du, u, i, p, t)
+        index = round(Int, i)
+        one_hot = zeros(num_series, 1)
+        one_hot[index] = 1
+        u1, u2 = scaled_tanh.(u)
+        vals = scaled_tanh.(NN(vcat([u1, u2, t], one_hot), p.NN, NNstates)[1])
+        a, γ, r, d = p.a, p.γ, p.r, p.d
+        du[1] = a * u1 * u2 + vals[1] + γ * u1 * (1 - u1 - u2)
+        du[2] = r * (1 - u1 - u2) * u2 - d * u2 - a * u1 * u2
     end
+
+	#Generate model using UniversalDiffEq
+    model = MultiCustomDerivatives(train_data,derivs!,parameters;proc_weight=2.0,obs_weight=0.5,reg_weight=10^-4)
     
+    #state_variable_transform = x -> 1 ./ (1 .+ exp.(-x)
 	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
     if !isnothing(saved_parameters)
         model.parameters = saved_parameters
@@ -325,7 +288,7 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
 
     #If returning inputs, collect inputs and output with model and test data. Otherwise, output output model and test data.
     if (return_inputs)
-        inputs = (maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d, hyperparameters = hyperparameters, X = X)
+        inputs = (maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d)
         return model, test_data, inputs 
     else 
         return model, test_data
@@ -333,41 +296,32 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
 end
 
 #Wrapper around ude_model_from_data that generates the data before training the model.
-function ude_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, return_covar = false, covar_fun = (g -> g), hyperparameters = DEFAULT_HYPERPARAMETERS, saved_parameters = nothing)
+function ude_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
 	
     #Generate Synthetic data using Mumby Equations
-    data = nothing 
-    X = nothing
-    if return_covar 
-        data, X = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ, return_covar = return_covar, covar_fun = covar_fun)
-    else 
-        data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ, return_covar = return_covar, covar_fun = covar_fun)
-    end 
+    data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
 
     #Generate the model 
-    model, test_data = ude_model_from_data(data, maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d, return_inputs = false, saved_parameters = saved_parameters, X = X, hyperparameters = hyperparameters)
+    model, test_data = ude_model_from_data(data, maxiter = maxiter, T1 = T1, a = a, γ = γ, r = r, d = d, return_inputs = false, saved_parameters = saved_parameters)
 
     #If returning inputs, collect inputs and output with model and test data. Otherwise, output model and test data. 
     if (return_inputs)
-        inputs = (maxiter = maxiter, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, T1 = T1, T2 = T2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ, return_covar = return_covar, covar_fun = covar_fun, hyperparameters = hyperparameters)
-        return model, test_data, inputs 
+        inputs = (maxiter = maxiter, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, T1 = T1, T2 = T2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+        return model, test_data, inputs
     else 
         return model, test_data
     end 
 end
 
 #Same as the UDE function above but trains a generic neural net [NODE] rather than a UDE
-function node_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
-    
-    #Generete Synthetic data using Mumby Equations
-    data = coral_data(plot = false, seed = seed, datasize = datasize, σ1 = σ1, σ2 = σ2, u01 = u01, u02 = u02, a = a, γ = γ, r = r, d = d, λ = λ)
+function node_model(data;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, saved_parameters = nothing)
 
 	#Seperate both data frames into testing data and training data
     train_data = subset(data, :time => time -> time .<= T1)
     test_data = subset(data, :time => time -> time .> T1)
 
 	#Generate NODE model 
-    model = NODE(train_data)
+    model = MultiNODE(train_data)
 
 	#Train the model. Use saved paramters if available (see jld.jl). Otherwise, train using gradient descent. Stop after maxiter steps if specified. 
     if !isnothing(saved_parameters)
