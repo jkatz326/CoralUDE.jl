@@ -244,7 +244,6 @@ function coral_data(;plot = false, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, 
     else
         return data
     end
-    
 end
 
 #Universal Differential Equation Model:
@@ -256,6 +255,10 @@ Parameters--
 - maxiter : max number of iterations for gradient descent. Default is negative which does not set a max number of iterations. 
 - Training data will be generated from times 0 to T1
 - Testing data will be generated from times T1 + 1 to last time in coral data 
+- hyperparameters : tuple of hyperparameters that are input to CustomDerivatives
+  DEFAULT_HYPERPARAMETERS is an exported global that can be modified as needed and then passed back in
+- X : covariate vector. Nothing is default value. In this case, model will be trained without covariate. Otherwise, covariate is included in training of the model.
+- saved_parameters : Previously saved parameters from trained model, used in JLD to load in saved model. Model is trained typically if default value of nothing.
 - Description of other model parameters can be found in code block above. 
 =#
 
@@ -332,7 +335,7 @@ function ude_model_from_data(data;maxiter = -1, T1 = 175, a = .1, γ = .8, r = 1
     end 
 end
 
-#Wrapper around ude_model_from_data that generates the data before training the model.
+#Wrapper around ude_model_from_data that generates the data before training the model. Returns a complete set of saved_parameters that does not need to be combined with any others if requested.
 function ude_model(;maxiter = -1, seed = 123, datasize = 60, σ1 = 0, σ2 = 0, T1 = 175, T2 = 300, u01 = .2, u02 = .2, a = .1, γ = .8, r = 1, d = .44, λ = constant_fun(.3), return_inputs = false, return_covar = false, covar_fun = (g -> g), hyperparameters = DEFAULT_HYPERPARAMETERS, saved_parameters = nothing)
 	
     #Generate Synthetic data using Mumby Equations
